@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/IBM/sarama v1.46.2
-	github.com/MamangRust/monolith-graphql-payment-gateway-shared v1.0.14
+	github.com/MamangRust/monolith-graphql-payment-gateway-shared v0.2.0
 	github.com/go-playground/assert/v2 v2.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
