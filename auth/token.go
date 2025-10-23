@@ -6,44 +6,41 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/MamangRust/monolith-graphql-payment-gateway-pkg/logger"
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
 )
 
-// ErrTokenExpired is an error that is returned when a JWT token is expired.
 var ErrTokenExpired = errors.New("token expired")
 
 //go:generate mockgen -source=token.go -destination=mocks/token.go
 type TokenManager interface {
 	GenerateToken(userId int, audience string) (string, error)
-	ValidateToken(tokenString string) (string, error)
+	ValidateToken(accessToken string) (int, error)
 }
 
 type Manager struct {
 	secretKey []byte
+	logger    logger.LoggerInterface
 }
 
-// NewManager creates a new Manager instance with the given secret key.
-//
-// The secret key is expected to be a non-empty string. If the secret key is
-// empty, an error is returned.
-func NewManager(secretKey string) (*Manager, error) {
+func NewManager(secretKey string, logger logger.LoggerInterface) (*Manager, error) {
 	if secretKey == "" {
 		return nil, errors.New("empty secret key")
 	}
-	return &Manager{secretKey: []byte(secretKey)}, nil
+	return &Manager{secretKey: []byte(secretKey), logger: logger}, nil
 }
 
-// GenerateToken generates a new JWT token for the given user ID and audience.
-//
-// The token is valid for 12 hours from the time it is generated.
-// The subject claim is set to the given user ID.
-// The audience claim is set to the given audience.
-// The token is signed with the secret key set on the Manager during initialization.
-//
-// If the token cannot be generated, an error is returned.
 func (m *Manager) GenerateToken(userId int, audience string) (string, error) {
 	nowTime := time.Now()
 	expireTime := nowTime.Add(12 * time.Hour)
+
+	m.logger.Debug("Generating access token",
+		zap.Int("user_id", userId),
+		zap.String("audience", audience),
+		zap.Time("issued_at", nowTime),
+		zap.Time("expires_at", expireTime),
+	)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		ExpiresAt: jwt.NewNumericDate(expireTime),
@@ -51,33 +48,71 @@ func (m *Manager) GenerateToken(userId int, audience string) (string, error) {
 		Audience:  []string{audience},
 	})
 
-	return token.SignedString([]byte(m.secretKey))
+	signed, err := token.SignedString([]byte(m.secretKey))
+	if err != nil {
+		m.logger.Error("Failed to sign token",
+			zap.Int("user_id", userId),
+			zap.Error(err),
+		)
+		return "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	m.logger.Debug("Token successfully generated",
+		zap.Int("user_id", userId),
+	)
+
+	return signed, nil
 }
 
-// ValidateToken validates a JWT token and returns the user ID string if the validation is successful.
-// If the token is invalid or expired, an error is returned.
-// The error is wrapped with jwt.ErrTokenExpired if the token is expired.
-// The error is wrapped with jwt.ErrTokenExpired if the token is expired.
-func (m *Manager) ValidateToken(accessToken string) (string, error) {
-	token, err := jwt.Parse(accessToken, func(token *jwt.Token) (i interface{}, err error) {
+func (m *Manager) ValidateToken(accessToken string) (int, error) {
+	m.logger.Debug("Validating access token")
+
+	token, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			m.logger.Error("Unexpected signing method",
+				zap.Any("header_alg", token.Header["alg"]),
+			)
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-
 		return []byte(m.secretKey), nil
 	})
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return "", ErrTokenExpired
+			m.logger.Debug("Access token expired")
+			return 0, ErrTokenExpired
 		}
-		return "", fmt.Errorf("failed to parse token: %w", err)
+
+		m.logger.Error("Failed to parse token", zap.Error(err))
+		return 0, fmt.Errorf("failed to parse token: %w", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return "", fmt.Errorf("error get user claims from token")
+		m.logger.Error("Failed to extract claims from token")
+		return 0, fmt.Errorf("error get user claims from token")
 	}
 
-	return claims["sub"].(string), nil
+	sub, ok := claims["sub"].(string)
+	if !ok {
+		m.logger.Error("Invalid subject claim type",
+			zap.Any("sub", claims["sub"]),
+		)
+		return 0, fmt.Errorf("invalid subject claim type")
+	}
+
+	userId, err := strconv.Atoi(sub)
+	if err != nil {
+		m.logger.Error("Invalid user ID format in subject claim",
+			zap.String("sub", sub),
+			zap.Error(err),
+		)
+		return 0, fmt.Errorf("invalid user ID format: %w", err)
+	}
+
+	m.logger.Debug("Token validated successfully",
+		zap.Int("user_id", userId),
+	)
+
+	return userId, nil
 }
